@@ -1,12 +1,23 @@
 import { Link } from "react-router";
 import type { Route } from "./+types/instructor";
-import { getCoursesByInstructor, getLessonCountForCourse } from "~/services/courseService";
-import { getEnrollmentCountForCourse } from "~/services/enrollmentService";
+import {
+  getInstructorAnalytics,
+  type InstructorAnalytics,
+} from "~/services/analyticsService";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
+import { Badge } from "~/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "~/components/ui/table";
 import { AlertTriangle, BookOpen, GraduationCap, Plus, Users } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
@@ -36,52 +47,87 @@ export async function loader({ request }: Route.LoaderArgs) {
     });
   }
 
-  const instructorCourses = getCoursesByInstructor(currentUserId);
-
-  const coursesWithStats = instructorCourses.map((course) => {
-    const lessonCount = getLessonCountForCourse(course.id);
-    const enrollmentCount = getEnrollmentCountForCourse(course.id);
-
-    return {
-      id: course.id,
-      title: course.title,
-      slug: course.slug,
-      description: course.description,
-      status: course.status,
-      coverImageUrl: course.coverImageUrl,
-      lessonCount,
-      enrollmentCount,
-      createdAt: course.createdAt,
-      updatedAt: course.updatedAt,
-    };
-  });
-
-  return { courses: coursesWithStats };
+  // One call feeds both the analytics section and the course cards,
+  // using grouped queries instead of one query per course.
+  return { analytics: getInstructorAnalytics(currentUserId) };
 }
 
 function statusBadge(status: string) {
   switch (status) {
     case CourseStatus.Published:
       return (
-        <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-400">
+        <Badge className="bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
           Published
-        </span>
+        </Badge>
       );
     case CourseStatus.Draft:
       return (
-        <span className="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
+        <Badge className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
           Draft
-        </span>
+        </Badge>
       );
     case CourseStatus.Archived:
-      return (
-        <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-800 dark:bg-gray-900/30 dark:text-gray-400">
-          Archived
-        </span>
-      );
+      return <Badge variant="secondary">Archived</Badge>;
     default:
       return null;
   }
+}
+
+function AnalyticsSection({ analytics }: { analytics: InstructorAnalytics }) {
+  return (
+    <section aria-labelledby="analytics-heading" className="mb-10 space-y-6">
+      <h2 id="analytics-heading" className="text-xl font-semibold">
+        Analytics
+      </h2>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Card className="gap-2">
+          <CardHeader className="flex flex-row items-center justify-between pb-0">
+            <span className="text-sm font-medium text-muted-foreground">
+              Students
+            </span>
+            <Users className="size-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-bold">{analytics.totals.students}</div>
+            <p className="text-xs text-muted-foreground">
+              Distinct students across all courses
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+      {analytics.courses.length > 0 && (
+        <Card className="py-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="pl-6">Course</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="pr-6 text-right">Students</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {analytics.courses.map((row) => (
+                <TableRow key={row.courseId}>
+                  <TableCell className="pl-6 font-medium">
+                    <Link
+                      to={`/instructor/${row.courseId}`}
+                      className="hover:text-primary"
+                    >
+                      {row.title}
+                    </Link>
+                  </TableCell>
+                  <TableCell>{statusBadge(row.status)}</TableCell>
+                  <TableCell className="pr-6 text-right tabular-nums">
+                    {row.studentCount}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+    </section>
+  );
 }
 
 export function HydrateFallback() {
@@ -121,7 +167,8 @@ export function HydrateFallback() {
 export default function InstructorDashboard({
   loaderData,
 }: Route.ComponentProps) {
-  const { courses } = loaderData;
+  const { analytics } = loaderData;
+  const courses = analytics.courses;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -149,6 +196,8 @@ export default function InstructorDashboard({
         </Link>
       </div>
 
+      <AnalyticsSection analytics={analytics} />
+
       {courses.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <GraduationCap className="mb-4 size-12 text-muted-foreground/50" />
@@ -166,7 +215,7 @@ export default function InstructorDashboard({
       ) : (
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {courses.map((course) => (
-            <Card key={course.id} className="flex flex-col overflow-hidden pt-0">
+            <Card key={course.courseId} className="flex flex-col overflow-hidden pt-0">
               <Link to={`/courses/${course.slug}`} className="aspect-video overflow-hidden">
                 <CourseImage
                   src={course.coverImageUrl}
@@ -200,14 +249,14 @@ export default function InstructorDashboard({
                   <div className="flex items-center gap-1.5">
                     <Users className="size-4" />
                     <span>
-                      {course.enrollmentCount}{" "}
-                      {course.enrollmentCount === 1 ? "student" : "students"}
+                      {course.studentCount}{" "}
+                      {course.studentCount === 1 ? "student" : "students"}
                     </span>
                   </div>
                 </div>
               </CardContent>
               <CardFooter>
-                <Link to={`/instructor/${course.id}`} className="w-full">
+                <Link to={`/instructor/${course.courseId}`} className="w-full">
                   <Button className="w-full" variant="outline">
                     <BookOpen className="mr-2 size-4" />
                     Edit Course
