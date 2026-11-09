@@ -8,6 +8,8 @@ import {
   enrollments,
   LessonProgressStatus,
 } from "~/db/schema";
+import { findEnrollment, markEnrollmentComplete } from "./enrollmentService";
+import { getCourseForLesson } from "./commentService";
 
 // ─── Progress Service ───
 // Handles lesson completion tracking and course progress calculation.
@@ -56,6 +58,12 @@ export function getLessonProgressForCourse(userId: number, courseId: number) {
 }
 
 export function markLessonComplete(userId: number, lessonId: number) {
+  const progress = upsertCompletedLessonProgress(userId, lessonId);
+  completeEnrollmentIfCourseFinished(userId, lessonId);
+  return progress;
+}
+
+function upsertCompletedLessonProgress(userId: number, lessonId: number) {
   const existing = getLessonProgress(userId, lessonId);
 
   if (existing) {
@@ -80,6 +88,22 @@ export function markLessonComplete(userId: number, lessonId: number) {
     })
     .returning()
     .get();
+}
+
+function completeEnrollmentIfCourseFinished(userId: number, lessonId: number) {
+  const lessonCourse = getCourseForLesson(lessonId);
+  if (!lessonCourse) return;
+
+  const { courseId } = lessonCourse;
+  const enrollment = findEnrollment(userId, courseId);
+  // Completion is a historical fact: never move an existing timestamp.
+  if (!enrollment || enrollment.completedAt) return;
+
+  if (getCompletedLessonCount(userId, courseId) < getTotalLessonCount(courseId)) {
+    return;
+  }
+
+  markEnrollmentComplete(userId, courseId);
 }
 
 export function markLessonInProgress(userId: number, lessonId: number) {
