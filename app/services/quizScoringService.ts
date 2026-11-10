@@ -272,49 +272,6 @@ export function computeResult(
   }
 }
 
-export function getQuizStats(quizId: any): any {
-  try {
-    const rows: any = getSqlite()
-      .prepare(
-        `SELECT
-        COUNT(*) as total_attempts,
-        AVG(score) as avg_score,
-        MAX(score) as high_score,
-        MIN(score) as low_score,
-        SUM(CASE WHEN passed = 1 THEN 1 ELSE 0 END) as pass_count
-      FROM quiz_attempts WHERE quiz_id = ?`
-      )
-      .get(quizId);
-
-    if (!rows || rows.total_attempts === 0) {
-      return {
-        totalAttempts: 0,
-        averageScore: 0,
-        highScore: 0,
-        lowScore: 0,
-        passRate: 0,
-      };
-    }
-
-    return {
-      totalAttempts: rows.total_attempts,
-      averageScore: rows.avg_score,
-      highScore: rows.high_score,
-      lowScore: rows.low_score,
-      passRate: rows.pass_count / rows.total_attempts,
-    };
-  } catch (e) {
-    console.log(e);
-    return {
-      totalAttempts: 0,
-      averageScore: 0,
-      highScore: 0,
-      lowScore: 0,
-      passRate: 0,
-    };
-  }
-}
-
 export function getUserQuizHistory(userId: any, quizId: any): any {
   try {
     const attempts = getSqlite()

@@ -103,6 +103,27 @@ function purchase(
     .get();
 }
 
+function addQuiz(lessonId: number, passingScore = 0.7) {
+  return testDb
+    .insert(schema.quizzes)
+    .values({ lessonId, title: "Q", passingScore })
+    .returning()
+    .get();
+}
+
+function attempt(
+  userId: number,
+  quizId: number,
+  score: number,
+  passed: boolean,
+  attemptedAt?: string
+) {
+  testDb
+    .insert(schema.quizAttempts)
+    .values({ userId, quizId, score, passed, attemptedAt })
+    .run();
+}
+
 type Analytics = ReturnType<typeof getInstructorAnalytics>;
 
 function rowOf(result: Analytics, courseId: number) {
@@ -546,6 +567,159 @@ describe("analyticsService", () => {
       const result = getInstructorAnalytics(base.instructor.id, CUTOFF);
 
       expect(result.totals.revenue).toBe(0);
+    });
+  });
+
+  describe("getInstructorAnalytics quizzes", () => {
+    it("counts each student's highest score, and as passed if any attempt passed", () => {
+      const [l1] = addLessons(base.course.id, 1);
+      const quiz = addQuiz(l1.id);
+      const retrier = addUser("retrier");
+      const struggler = addUser("struggler");
+      // retrier fails, then passes: best is 0.9, passed.
+      attempt(retrier.id, quiz.id, 0.4, false);
+      attempt(retrier.id, quiz.id, 0.9, true);
+      // struggler's later, worse attempt doesn't drag the best down.
+      attempt(struggler.id, quiz.id, 0.6, false);
+      attempt(struggler.id, quiz.id, 0.2, false);
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      // best scores 0.9 and 0.6 -> 0.75; 1 of 2 students passed.
+      expect(rowOf(result, base.course.id).quizScore).toBeCloseTo(0.75);
+      expect(rowOf(result, base.course.id).quizPassRate).toBe(0.5);
+      expect(result.totals.quizScore).toBeCloseTo(0.75);
+      expect(result.totals.quizPassRate).toBe(0.5);
+    });
+
+    it("weights every quiz equally, per course and across all quizzes in the total", () => {
+      // base course: quiz A with three students, quiz B with one.
+      const [a1, a2] = addLessons(base.course.id, 2);
+      const quizA = addQuiz(a1.id);
+      const quizB = addQuiz(a2.id);
+      const [x, y, z] = [addUser("x"), addUser("y"), addUser("z")];
+      attempt(x.id, quizA.id, 1, true);
+      attempt(y.id, quizA.id, 1, true);
+      attempt(z.id, quizA.id, 1, true);
+      attempt(x.id, quizB.id, 0.2, false);
+      // second course: one quiz, one student.
+      const second = addCourse(base.instructor.id, "second");
+      const [b1] = addLessons(second.id, 1);
+      const quizC = addQuiz(b1.id);
+      attempt(x.id, quizC.id, 0.6, false);
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      // Per quiz: A = 1 / 1, B = 0.2 / 0, C = 0.6 / 0.
+      // Weighting by student would give base 0.8 / 0.75.
+      expect(rowOf(result, base.course.id).quizScore).toBeCloseTo(0.6);
+      expect(rowOf(result, base.course.id).quizPassRate).toBe(0.5);
+      expect(rowOf(result, second.id).quizScore).toBeCloseTo(0.6);
+      expect(rowOf(result, second.id).quizPassRate).toBe(0);
+      // Mean over the three quizzes; averaging the course figures would give
+      // a pass rate of 0.25.
+      expect(result.totals.quizScore).toBeCloseTo(0.6);
+      expect(result.totals.quizPassRate).toBeCloseTo(1 / 3);
+    });
+
+    it("reports null quiz figures for courses with no quizzes or no attempts, and leaves unattempted quizzes out", () => {
+      const [l1, l2] = addLessons(base.course.id, 2);
+      const attempted = addQuiz(l1.id);
+      addQuiz(l2.id); // never attempted: not a 0
+      attempt(base.user.id, attempted.id, 0.8, true);
+      const noAttempts = addCourse(base.instructor.id, "no-attempts");
+      const [n1] = addLessons(noAttempts.id, 1);
+      addQuiz(n1.id);
+      const noQuizzes = addCourse(base.instructor.id, "no-quizzes");
+      addLessons(noQuizzes.id, 1);
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(rowOf(result, base.course.id)).toMatchObject({
+        quizCount: 2,
+        quizPassRate: 1,
+      });
+      expect(rowOf(result, base.course.id).quizScore).toBeCloseTo(0.8);
+      expect(rowOf(result, noAttempts.id)).toMatchObject({
+        quizCount: 1,
+        quizScore: null,
+        quizPassRate: null,
+      });
+      expect(rowOf(result, noQuizzes.id)).toMatchObject({
+        quizCount: 0,
+        quizScore: null,
+        quizPassRate: null,
+      });
+      expect(result.totals.quizScore).toBeCloseTo(0.8);
+      expect(result.totals.quizPassRate).toBe(1);
+    });
+
+    it("reports null quiz totals when nothing was attempted", () => {
+      const [l1] = addLessons(base.course.id, 1);
+      addQuiz(l1.id);
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(result.totals).toMatchObject({
+        quizScore: null,
+        quizPassRate: null,
+      });
+    });
+
+    it("never includes another instructor's quizzes or attempts", () => {
+      const otherInstructor = addUser(
+        "other-instructor",
+        schema.UserRole.Instructor
+      );
+      const foreign = addCourse(otherInstructor.id, "foreign");
+      const [f1] = addLessons(foreign.id, 1);
+      attempt(base.user.id, addQuiz(f1.id).id, 0, false);
+      const [l1] = addLessons(base.course.id, 1);
+      attempt(base.user.id, addQuiz(l1.id).id, 1, true);
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(result.totals).toMatchObject({ quizScore: 1, quizPassRate: 1 });
+    });
+
+    it("with a cutoff considers only attempts made at or after it", () => {
+      const [l1] = addLessons(base.course.id, 1);
+      const quiz = addQuiz(l1.id);
+      const [a, b, c] = [addUser("a"), addUser("b"), addUser("c")];
+      attempt(a.id, quiz.id, 0.5, false, JUST_INSIDE);
+      attempt(b.id, quiz.id, 0.8, true, AT_CUTOFF);
+      attempt(c.id, quiz.id, 1, true, JUST_OUTSIDE);
+      // a's best attempt overall is outside the window, so it doesn't count.
+      attempt(a.id, quiz.id, 1, true, JUST_OUTSIDE);
+
+      const windowed = getInstructorAnalytics(base.instructor.id, CUTOFF);
+      const allTime = getInstructorAnalytics(base.instructor.id);
+
+      // In window: a 0.5 (failed), b 0.8 (passed).
+      expect(rowOf(windowed, base.course.id).quizScore).toBeCloseTo(0.65);
+      expect(rowOf(windowed, base.course.id).quizPassRate).toBe(0.5);
+      expect(windowed.totals.quizScore).toBeCloseTo(0.65);
+      expect(windowed.totals.quizPassRate).toBe(0.5);
+      // All time: a 1, b 0.8, c 1, all passed.
+      expect(rowOf(allTime, base.course.id).quizScore).toBeCloseTo(2.8 / 3);
+      expect(rowOf(allTime, base.course.id).quizPassRate).toBe(1);
+    });
+
+    it("with a cutoff reports null for a course whose attempts all predate it", () => {
+      const [l1] = addLessons(base.course.id, 1);
+      attempt(base.user.id, addQuiz(l1.id).id, 1, true, JUST_OUTSIDE);
+
+      const result = getInstructorAnalytics(base.instructor.id, CUTOFF);
+
+      expect(rowOf(result, base.course.id)).toMatchObject({
+        quizCount: 1,
+        quizScore: null,
+        quizPassRate: null,
+      });
+      expect(result.totals).toMatchObject({
+        quizScore: null,
+        quizPassRate: null,
+      });
     });
   });
 });

@@ -4,6 +4,7 @@ import {
   countDistinct,
   eq,
   gte,
+  max,
   min,
   sql,
   sum,
@@ -17,6 +18,8 @@ import {
   lessons,
   modules,
   purchases,
+  quizAttempts,
+  quizzes,
 } from "~/db/schema";
 
 /**
@@ -63,6 +66,16 @@ export function getInstructorAnalytics(instructorId: number, since?: Date) {
     .groupBy(modules.courseId)
     .all();
 
+  const quizCounts = db
+    .select({ courseId: modules.courseId, count: count(quizzes.id) })
+    .from(quizzes)
+    .innerJoin(lessons, eq(lessons.id, quizzes.lessonId))
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .innerJoin(courses, eq(courses.id, modules.courseId))
+    .where(ownCourse)
+    .groupBy(modules.courseId)
+    .all();
+
   // Distinct across all courses: a student in two courses counts once.
   const totalStudents = db
     .select({ count: countDistinct(enrollments.userId) })
@@ -73,10 +86,12 @@ export function getInstructorAnalytics(instructorId: number, since?: Date) {
 
   const studentsByCourse = byCourse(studentCounts);
   const lessonsByCourse = byCourse(lessonCounts);
+  const quizzesByCourse = byCourse(quizCounts);
   const newInWindow = since ? newEnrollmentCounts(instructorId, since) : null;
   // Completion is always all time: `since` is deliberately not passed.
   const completion = completionFigures(instructorId);
   const revenue = revenueFigures(instructorId, since);
+  const quiz = quizFigures(instructorId, since);
 
   return {
     totals: {
@@ -84,6 +99,7 @@ export function getInstructorAnalytics(instructorId: number, since?: Date) {
       newEnrollments: newInWindow?.total ?? null,
       revenue: revenue.total,
       ...completion.total,
+      ...quiz.total,
     },
     courses: instructorCourses.map((course) => ({
       courseId: course.id,
@@ -93,12 +109,14 @@ export function getInstructorAnalytics(instructorId: number, since?: Date) {
       coverImageUrl: course.coverImageUrl,
       status: course.status,
       lessonCount: lessonsByCourse.get(course.id) ?? 0,
+      quizCount: quizzesByCourse.get(course.id) ?? 0,
       studentCount: studentsByCourse.get(course.id) ?? 0,
       newEnrollmentCount: newInWindow
         ? (newInWindow.byCourse.get(course.id) ?? 0)
         : null,
       revenue: revenue.byCourse.get(course.id) ?? 0,
       ...(completion.byCourse.get(course.id) ?? NO_COMPLETION_DATA),
+      ...(quiz.byCourse.get(course.id) ?? NO_QUIZ_DATA),
     })),
   };
 }
@@ -290,5 +308,87 @@ function completionFigures(instructorId: number): {
       ])
     ),
     total: total ?? NO_COMPLETION_DATA,
+  };
+}
+
+type QuizFigures = {
+  quizScore: number | null;
+  quizPassRate: number | null;
+};
+
+const NO_QUIZ_DATA: QuizFigures = { quizScore: null, quizPassRate: null };
+
+/**
+ * Average best score and pass rate, as fractions in [0, 1].
+ *
+ * For each quiz, each student's best attempt counts: their highest score, and
+ * whether any attempt passed. A quiz's score is the mean of its students' best
+ * scores; its pass rate the share of those students who passed. A course's
+ * figures are the unweighted mean over its quizzes, and the totals the mean
+ * over all of the instructor's quizzes. Quizzes without attempts have no
+ * figures and are left out, so a course with none of them gets `null`.
+ * With `since`, only attempts made at or after it are considered.
+ */
+function quizFigures(
+  instructorId: number,
+  since?: Date
+): {
+  byCourse: Map<number, QuizFigures>;
+  total: QuizFigures;
+} {
+  const best = db
+    .select({
+      quizId: quizAttempts.quizId,
+      courseId: modules.courseId,
+      bestScore: max(quizAttempts.score).as("best_score"),
+      // `passed` is stored as 0/1, so max() is "passed at least once".
+      passed: sql<number>`max(${quizAttempts.passed})`.as("passed"),
+    })
+    .from(quizAttempts)
+    .innerJoin(quizzes, eq(quizzes.id, quizAttempts.quizId))
+    .innerJoin(lessons, eq(lessons.id, quizzes.lessonId))
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .innerJoin(courses, eq(courses.id, modules.courseId))
+    .where(
+      and(
+        eq(courses.instructorId, instructorId),
+        // Timestamps are ISO-8601 UTC strings, so string order is time order.
+        since ? gte(quizAttempts.attemptedAt, since.toISOString()) : undefined
+      )
+    )
+    .groupBy(quizAttempts.quizId, quizAttempts.userId, modules.courseId)
+    .as("best");
+
+  const perQuiz = db
+    .select({
+      courseId: best.courseId,
+      score: sql<number>`avg(${best.bestScore})`.as("score"),
+      passRate: sql<number>`avg(${best.passed})`.as("pass_rate"),
+    })
+    .from(best)
+    .groupBy(best.quizId, best.courseId)
+    .as("per_quiz");
+
+  const figures = {
+    quizScore: sql<number | null>`avg(${perQuiz.score})`,
+    quizPassRate: sql<number | null>`avg(${perQuiz.passRate})`,
+  };
+
+  const perCourse = db
+    .select({ courseId: perQuiz.courseId, ...figures })
+    .from(perQuiz)
+    .groupBy(perQuiz.courseId)
+    .all();
+
+  const total = db.select(figures).from(perQuiz).get();
+
+  return {
+    byCourse: new Map(
+      perCourse.map(({ courseId, ...courseFigures }) => [
+        courseId,
+        courseFigures,
+      ])
+    ),
+    total: total ?? NO_QUIZ_DATA,
   };
 }

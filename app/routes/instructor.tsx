@@ -29,6 +29,7 @@ import {
   AlertTriangle,
   BookOpen,
   CircleCheck,
+  ClipboardCheck,
   DollarSign,
   GraduationCap,
   Plus,
@@ -174,6 +175,21 @@ function noCompletionDataReason(row: InstructorAnalytics["courses"][number]) {
     : "No students are enrolled yet.";
 }
 
+function noQuizAttemptsReason(windowed: boolean) {
+  return windowed
+    ? "No quiz attempts in the last 30 days."
+    : "No quiz attempts yet.";
+}
+
+function noQuizDataReason(
+  row: InstructorAnalytics["courses"][number],
+  windowed: boolean
+) {
+  return row.quizCount === 0
+    ? "This course has no quizzes."
+    : noQuizAttemptsReason(windowed);
+}
+
 function PercentCell({
   value,
   label,
@@ -274,8 +290,15 @@ function AnalyticsSection({
   analytics: InstructorAnalytics;
   range: Range;
 }) {
-  const { students, newEnrollments, revenue, completionRate, averageProgress } =
-    analytics.totals;
+  const {
+    students,
+    newEnrollments,
+    revenue,
+    completionRate,
+    averageProgress,
+    quizScore,
+    quizPassRate,
+  } = analytics.totals;
   const windowed = newEnrollments !== null;
 
   return (
@@ -346,6 +369,38 @@ function AnalyticsSection({
             </p>
           </CardContent>
         </Card>
+        <Card className="gap-2">
+          <CardHeader className="flex flex-row items-center justify-between pb-0">
+            <span className="text-sm font-medium text-muted-foreground">
+              Quizzes
+            </span>
+            <ClipboardCheck className="size-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <div className="text-3xl font-bold">
+              {quizScore === null ? (
+                <NoData
+                  reason={
+                    analytics.courses.some((c) => c.quizCount > 0)
+                      ? noQuizAttemptsReason(windowed)
+                      : "None of these courses has a quiz yet."
+                  }
+                />
+              ) : (
+                percent(quizScore)
+              )}
+            </div>
+            {quizScore !== null && (
+              <ProgressBar value={quizScore} label="Average best quiz score" />
+            )}
+            <p className="text-xs text-muted-foreground">
+              {quizPassRate === null
+                ? "Average best score"
+                : `${percent(quizPassRate)} pass rate`}{" "}
+              · {RANGES[range].label.toLowerCase()}
+            </p>
+          </CardContent>
+        </Card>
       </div>
       {analytics.courses.length > 0 && (
         <Card className="py-0">
@@ -366,7 +421,7 @@ function AnalyticsSection({
                     </span>
                   )}
                 </TableHead>
-                <TableHead className="pr-6 text-right" title="Always all time">
+                <TableHead className="text-right" title="Always all time">
                   Avg. progress
                   {windowed && (
                     <span className="ml-1 font-normal text-muted-foreground">
@@ -374,11 +429,24 @@ function AnalyticsSection({
                     </span>
                   )}
                 </TableHead>
+                <TableHead
+                  className="text-right"
+                  title="Mean over quizzes of each student's best score"
+                >
+                  Quiz score
+                </TableHead>
+                <TableHead
+                  className="pr-6 text-right"
+                  title="Mean over quizzes of the share of students who passed"
+                >
+                  Pass rate
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {analytics.courses.map((row) => {
                 const emptyReason = noCompletionDataReason(row);
+                const quizEmptyReason = noQuizDataReason(row, windowed);
                 return (
                 <TableRow key={row.courseId}>
                   <TableCell className="pl-6 font-medium">
@@ -412,11 +480,25 @@ function AnalyticsSection({
                       emptyReason={emptyReason}
                     />
                   </TableCell>
-                  <TableCell className="pr-6 text-right">
+                  <TableCell className="text-right">
                     <PercentCell
                       value={row.averageProgress}
                       label={`Average progress for ${row.title}`}
                       emptyReason={emptyReason}
+                    />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <PercentCell
+                      value={row.quizScore}
+                      label={`Average best quiz score for ${row.title}`}
+                      emptyReason={quizEmptyReason}
+                    />
+                  </TableCell>
+                  <TableCell className="pr-6 text-right">
+                    <PercentCell
+                      value={row.quizPassRate}
+                      label={`Quiz pass rate for ${row.title}`}
+                      emptyReason={quizEmptyReason}
                     />
                   </TableCell>
                 </TableRow>
