@@ -16,9 +16,14 @@ import { getInstructorAnalytics } from "./analyticsService";
 import { createTeamPurchase } from "./purchaseService";
 import { redeemCoupon } from "./couponService";
 
-function enroll(userId: number, courseId: number) {
-  testDb.insert(schema.enrollments).values({ userId, courseId }).run();
+function enroll(userId: number, courseId: number, enrolledAt?: string) {
+  testDb.insert(schema.enrollments).values({ userId, courseId, enrolledAt }).run();
 }
+
+const CUTOFF = new Date("2026-06-01T00:00:00.000Z");
+const JUST_INSIDE = "2026-06-01T00:00:00.001Z";
+const AT_CUTOFF = "2026-06-01T00:00:00.000Z";
+const JUST_OUTSIDE = "2026-05-31T23:59:59.999Z";
 
 function addCourse(
   instructorId: number,
@@ -185,6 +190,79 @@ describe("analyticsService", () => {
       });
       expect(studentCountOf(result, base.course.id)).toBe(0);
       expect(result.totals.students).toBe(0);
+    });
+  });
+
+  describe("getInstructorAnalytics with a cutoff", () => {
+    it("counts enrollments at or after the cutoff as new, alongside the all-time total", () => {
+      const a = addUser("a");
+      const b = addUser("b");
+      const c = addUser("c");
+      enroll(a.id, base.course.id, JUST_INSIDE);
+      enroll(b.id, base.course.id, AT_CUTOFF);
+      enroll(c.id, base.course.id, JUST_OUTSIDE);
+
+      const result = getInstructorAnalytics(base.instructor.id, CUTOFF);
+
+      expect(result.totals).toMatchObject({ students: 3, newEnrollments: 2 });
+      expect(rowOf(result, base.course.id)).toMatchObject({
+        studentCount: 3,
+        newEnrollmentCount: 2,
+      });
+    });
+
+    it("reports no new-enrollment figures without a cutoff", () => {
+      enroll(base.user.id, base.course.id, JUST_INSIDE);
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(result.totals.newEnrollments).toBeNull();
+      expect(rowOf(result, base.course.id).newEnrollmentCount).toBeNull();
+    });
+
+    it("does not count a duplicate re-enrollment of an existing student as new", () => {
+      enroll(base.user.id, base.course.id, JUST_OUTSIDE);
+      enroll(base.user.id, base.course.id, JUST_INSIDE);
+
+      const result = getInstructorAnalytics(base.instructor.id, CUTOFF);
+
+      expect(result.totals).toMatchObject({ students: 1, newEnrollments: 0 });
+      expect(rowOf(result, base.course.id).newEnrollmentCount).toBe(0);
+    });
+
+    it("counts new enrollments per course and sums them in the total", () => {
+      const second = addCourse(base.instructor.id, "second");
+      const empty = addCourse(base.instructor.id, "empty");
+      const other = addUser("other");
+      const veteran = addUser("veteran");
+      // base.user enrolls newly in both courses: two new enrollments.
+      enroll(base.user.id, base.course.id, JUST_INSIDE);
+      enroll(base.user.id, second.id, JUST_INSIDE);
+      enroll(other.id, second.id, JUST_INSIDE);
+      // veteran's first enrollment in second is a new enrollment, even
+      // though they took the base course long ago.
+      enroll(veteran.id, base.course.id, JUST_OUTSIDE);
+      enroll(veteran.id, second.id, JUST_INSIDE);
+      // Another instructor's new enrollments never leak in.
+      const otherInstructor = addUser("other-instructor", schema.UserRole.Instructor);
+      const foreign = addCourse(otherInstructor.id, "foreign");
+      enroll(other.id, foreign.id, JUST_INSIDE);
+
+      const result = getInstructorAnalytics(base.instructor.id, CUTOFF);
+
+      expect(rowOf(result, base.course.id)).toMatchObject({
+        studentCount: 2,
+        newEnrollmentCount: 1,
+      });
+      expect(rowOf(result, second.id)).toMatchObject({
+        studentCount: 3,
+        newEnrollmentCount: 3,
+      });
+      expect(rowOf(result, empty.id)).toMatchObject({
+        studentCount: 0,
+        newEnrollmentCount: 0,
+      });
+      expect(result.totals).toMatchObject({ students: 3, newEnrollments: 4 });
     });
   });
 });

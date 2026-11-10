@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import type { Route } from "./+types/instructor";
 import {
   getInstructorAnalytics,
@@ -30,7 +30,25 @@ export function meta() {
   ];
 }
 
-export async function loader({ request }: Route.LoaderArgs) {
+const RANGES = {
+  all: { label: "All time", days: null },
+  "30d": { label: "Last 30 days", days: 30 },
+} as const;
+
+type Range = keyof typeof RANGES;
+
+/** Missing or unknown values fall back to all time. */
+function parseRange(value: string | null): Range {
+  return value !== null && Object.hasOwn(RANGES, value) ? (value as Range) : "all";
+}
+
+function cutoffFor(range: Range, now = new Date()): Date | undefined {
+  const { days } = RANGES[range];
+  if (days === null) return undefined;
+  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+}
+
+export async function loader({ request, url }: Route.LoaderArgs) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
@@ -47,9 +65,14 @@ export async function loader({ request }: Route.LoaderArgs) {
     });
   }
 
+  const range = parseRange(url.searchParams.get("range"));
+
   // One call feeds both the analytics section and the course cards,
   // using grouped queries instead of one query per course.
-  return { analytics: getInstructorAnalytics(currentUserId) };
+  return {
+    range,
+    analytics: getInstructorAnalytics(currentUserId, cutoffFor(range)),
+  };
 }
 
 function statusBadge(status: string) {
@@ -73,24 +96,78 @@ function statusBadge(status: string) {
   }
 }
 
-function AnalyticsSection({ analytics }: { analytics: InstructorAnalytics }) {
+function RangeToggle({ range }: { range: Range }) {
+  const [searchParams] = useSearchParams();
+
+  return (
+    <div
+      role="group"
+      aria-label="Date range"
+      className="inline-flex rounded-md border bg-muted p-0.5"
+    >
+      {(Object.keys(RANGES) as Range[]).map((value) => {
+        const params = new URLSearchParams(searchParams);
+        if (value === "all") params.delete("range");
+        else params.set("range", value);
+        const query = params.toString();
+        const active = value === range;
+
+        return (
+          <Link
+            key={value}
+            to={query ? `?${query}` : "."}
+            replace
+            preventScrollReset
+            aria-current={active ? "true" : undefined}
+            className={
+              "rounded px-3 py-1 text-sm font-medium transition-colors " +
+              (active
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground")
+            }
+          >
+            {RANGES[value].label}
+          </Link>
+        );
+      })}
+    </div>
+  );
+}
+
+function AnalyticsSection({
+  analytics,
+  range,
+}: {
+  analytics: InstructorAnalytics;
+  range: Range;
+}) {
+  const { students, newEnrollments } = analytics.totals;
+  const windowed = newEnrollments !== null;
+
   return (
     <section aria-labelledby="analytics-heading" className="mb-10 space-y-6">
-      <h2 id="analytics-heading" className="text-xl font-semibold">
-        Analytics
-      </h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 id="analytics-heading" className="text-xl font-semibold">
+          Analytics
+        </h2>
+        <RangeToggle range={range} />
+      </div>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card className="gap-2">
           <CardHeader className="flex flex-row items-center justify-between pb-0">
             <span className="text-sm font-medium text-muted-foreground">
-              Students
+              {windowed ? "New enrollments" : "Students"}
             </span>
             <Users className="size-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold">{analytics.totals.students}</div>
+            <div className="text-3xl font-bold">
+              {windowed ? newEnrollments : students}
+            </div>
             <p className="text-xs text-muted-foreground">
-              Distinct students across all courses
+              {windowed
+                ? `${students} distinct students in total`
+                : "Distinct students across all courses"}
             </p>
           </CardContent>
         </Card>
@@ -102,7 +179,9 @@ function AnalyticsSection({ analytics }: { analytics: InstructorAnalytics }) {
               <TableRow>
                 <TableHead className="pl-6">Course</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead className="pr-6 text-right">Students</TableHead>
+                <TableHead className="pr-6 text-right">
+                  {windowed ? "New enrollments" : "Students"}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -118,7 +197,16 @@ function AnalyticsSection({ analytics }: { analytics: InstructorAnalytics }) {
                   </TableCell>
                   <TableCell>{statusBadge(row.status)}</TableCell>
                   <TableCell className="pr-6 text-right tabular-nums">
-                    {row.studentCount}
+                    {windowed ? (
+                      <>
+                        {row.newEnrollmentCount}
+                        <span className="ml-1 text-xs text-muted-foreground">
+                          / {row.studentCount} students
+                        </span>
+                      </>
+                    ) : (
+                      row.studentCount
+                    )}
                   </TableCell>
                 </TableRow>
               ))}
@@ -167,7 +255,7 @@ export function HydrateFallback() {
 export default function InstructorDashboard({
   loaderData,
 }: Route.ComponentProps) {
-  const { analytics } = loaderData;
+  const { analytics, range } = loaderData;
   const courses = analytics.courses;
 
   return (
@@ -196,7 +284,7 @@ export default function InstructorDashboard({
         </Link>
       </div>
 
-      <AnalyticsSection analytics={analytics} />
+      <AnalyticsSection analytics={analytics} range={range} />
 
       {courses.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
