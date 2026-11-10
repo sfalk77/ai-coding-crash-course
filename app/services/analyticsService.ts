@@ -1,6 +1,13 @@
-import { count, countDistinct, eq, gte, min } from "drizzle-orm";
+import { and, count, countDistinct, eq, gte, min, sql } from "drizzle-orm";
 import { db } from "~/db";
-import { courses, enrollments, lessons, modules } from "~/db/schema";
+import {
+  courses,
+  enrollments,
+  lessonProgress,
+  LessonProgressStatus,
+  lessons,
+  modules,
+} from "~/db/schema";
 
 /**
  * Analytics across all of one instructor's courses (every status).
@@ -57,11 +64,14 @@ export function getInstructorAnalytics(instructorId: number, since?: Date) {
   const studentsByCourse = byCourse(studentCounts);
   const lessonsByCourse = byCourse(lessonCounts);
   const newInWindow = since ? newEnrollmentCounts(instructorId, since) : null;
+  // Completion is always all time: `since` is deliberately not passed.
+  const completion = completionFigures(instructorId);
 
   return {
     totals: {
       students: totalStudents?.count ?? 0,
       newEnrollments: newInWindow?.total ?? null,
+      ...completion.total,
     },
     courses: instructorCourses.map((course) => ({
       courseId: course.id,
@@ -75,6 +85,7 @@ export function getInstructorAnalytics(instructorId: number, since?: Date) {
       newEnrollmentCount: newInWindow
         ? (newInWindow.byCourse.get(course.id) ?? 0)
         : null,
+      ...(completion.byCourse.get(course.id) ?? NO_COMPLETION_DATA),
     })),
   };
 }
@@ -124,4 +135,115 @@ function newEnrollmentCounts(instructorId: number, since: Date) {
     .get();
 
   return { byCourse: byCourse(perCourse), total: total?.count ?? 0 };
+}
+
+type CompletionFigures = {
+  completionRate: number | null;
+  averageProgress: number | null;
+};
+
+const NO_COMPLETION_DATA: CompletionFigures = {
+  completionRate: null,
+  averageProgress: null,
+};
+
+/**
+ * Completion rate and average progress, as fractions in [0, 1].
+ *
+ * The unit is an enrolled (student, course) pair. Each pair's progress is the
+ * share of the course's current lessons the student has completed; a pair is
+ * complete when that share is 1. Courses without lessons or without enrolled
+ * students have no pairs, so their figures are `null`. The totals aggregate
+ * over every pair of every course rather than averaging per-course figures.
+ */
+function completionFigures(instructorId: number): {
+  byCourse: Map<number, CompletionFigures>;
+  total: CompletionFigures;
+} {
+  const ownCourse = eq(courses.instructorId, instructorId);
+
+  // Enrollments carry no uniqueness constraint, so collapse duplicates.
+  const enrolled = db
+    .selectDistinct({
+      userId: enrollments.userId,
+      courseId: enrollments.courseId,
+    })
+    .from(enrollments)
+    .innerJoin(courses, eq(courses.id, enrollments.courseId))
+    .where(ownCourse)
+    .as("enrolled");
+
+  const lessonTotals = db
+    .select({
+      courseId: modules.courseId,
+      lessonCount: count(lessons.id).as("lesson_count"),
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .innerJoin(courses, eq(courses.id, modules.courseId))
+    .where(ownCourse)
+    .groupBy(modules.courseId)
+    .as("lesson_totals");
+
+  // Distinct lessons, in case a lesson has several progress rows.
+  const completedLessons = db
+    .select({
+      userId: lessonProgress.userId,
+      courseId: modules.courseId,
+      completed: countDistinct(lessonProgress.lessonId).as("completed"),
+    })
+    .from(lessonProgress)
+    .innerJoin(lessons, eq(lessons.id, lessonProgress.lessonId))
+    .innerJoin(modules, eq(modules.id, lessons.moduleId))
+    .innerJoin(courses, eq(courses.id, modules.courseId))
+    .where(
+      and(ownCourse, eq(lessonProgress.status, LessonProgressStatus.Completed))
+    )
+    .groupBy(lessonProgress.userId, modules.courseId)
+    .as("completed_lessons");
+
+  // One row per enrolled pair in a course that has lessons.
+  const pairs = db
+    .select({
+      courseId: enrolled.courseId,
+      share:
+        sql<number>`1.0 * coalesce(${completedLessons.completed}, 0) / ${lessonTotals.lessonCount}`.as(
+          "share"
+        ),
+    })
+    .from(enrolled)
+    .innerJoin(lessonTotals, eq(lessonTotals.courseId, enrolled.courseId))
+    .leftJoin(
+      completedLessons,
+      and(
+        eq(completedLessons.userId, enrolled.userId),
+        eq(completedLessons.courseId, enrolled.courseId)
+      )
+    )
+    .as("pairs");
+
+  const figures = {
+    completionRate: sql<
+      number | null
+    >`avg(case when ${pairs.share} >= 1 then 1.0 else 0.0 end)`,
+    averageProgress: sql<number | null>`avg(${pairs.share})`,
+  };
+
+  const perCourse = db
+    .select({ courseId: pairs.courseId, ...figures })
+    .from(pairs)
+    .groupBy(pairs.courseId)
+    .all();
+
+  const total = db.select(figures).from(pairs).get();
+
+  return {
+    byCourse: new Map(
+      perCourse.map(({ courseId, ...courseFigures }) => [
+        courseId,
+        courseFigures,
+      ])
+    ),
+    total: total ?? NO_COMPLETION_DATA,
+  };
 }

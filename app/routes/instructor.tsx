@@ -18,7 +18,14 @@ import {
   TableHeader,
   TableRow,
 } from "~/components/ui/table";
-import { AlertTriangle, BookOpen, GraduationCap, Plus, Users } from "lucide-react";
+import {
+  AlertTriangle,
+  BookOpen,
+  CircleCheck,
+  GraduationCap,
+  Plus,
+  Users,
+} from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
 import { CourseStatus, UserRole } from "~/db/schema";
@@ -96,6 +103,65 @@ function statusBadge(status: string) {
   }
 }
 
+/** Whole-number percentage (0–100) of a fraction in [0, 1]. */
+function wholePercent(fraction: number) {
+  return Math.round(fraction * 100);
+}
+
+function percent(fraction: number) {
+  return `${wholePercent(fraction)}%`;
+}
+
+function ProgressBar({ value, label }: { value: number; label: string }) {
+  const pct = wholePercent(value);
+  return (
+    <div
+      role="progressbar"
+      aria-label={label}
+      aria-valuenow={pct}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+    >
+      <div className="h-full rounded-full bg-primary" style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+/** "—" with an explanation, for figures that are undefined rather than 0. */
+function NoData({ reason }: { reason: string }) {
+  return (
+    <span title={reason} aria-label={reason} className="cursor-help text-muted-foreground">
+      —
+    </span>
+  );
+}
+
+function noCompletionDataReason(row: InstructorAnalytics["courses"][number]) {
+  // Figures are only null for a course without lessons or without students.
+  return row.lessonCount === 0
+    ? "This course has no lessons yet."
+    : "No students are enrolled yet.";
+}
+
+function PercentCell({
+  value,
+  label,
+  emptyReason,
+}: {
+  value: number | null;
+  label: string;
+  emptyReason: string;
+}) {
+  if (value === null) return <NoData reason={emptyReason} />;
+  return (
+    <div className="ml-auto flex w-28 flex-col items-end gap-1">
+      <span className="tabular-nums">{percent(value)}</span>
+      <ProgressBar value={value} label={label} />
+    </div>
+  );
+}
+
 function RangeToggle({ range }: { range: Range }) {
   const [searchParams] = useSearchParams();
 
@@ -141,7 +207,8 @@ function AnalyticsSection({
   analytics: InstructorAnalytics;
   range: Range;
 }) {
-  const { students, newEnrollments } = analytics.totals;
+  const { students, newEnrollments, completionRate, averageProgress } =
+    analytics.totals;
   const windowed = newEnrollments !== null;
 
   return (
@@ -171,6 +238,31 @@ function AnalyticsSection({
             </p>
           </CardContent>
         </Card>
+        <Card className="gap-2">
+          <CardHeader className="flex flex-row items-center justify-between pb-0">
+            <span className="text-sm font-medium text-muted-foreground">
+              Completion
+            </span>
+            <CircleCheck className="size-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <div className="text-3xl font-bold">
+              {completionRate === null ? (
+                <NoData reason="No enrolled students in courses with lessons yet." />
+              ) : (
+                percent(completionRate)
+              )}
+            </div>
+            {completionRate !== null && (
+              <ProgressBar value={completionRate} label="Completion rate" />
+            )}
+            <p className="text-xs text-muted-foreground">
+              {averageProgress === null
+                ? "Students who finished every lesson · all time"
+                : `${percent(averageProgress)} average progress · all time`}
+            </p>
+          </CardContent>
+        </Card>
       </div>
       {analytics.courses.length > 0 && (
         <Card className="py-0">
@@ -179,13 +271,31 @@ function AnalyticsSection({
               <TableRow>
                 <TableHead className="pl-6">Course</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead className="pr-6 text-right">
+                <TableHead className="text-right">
                   {windowed ? "New enrollments" : "Students"}
+                </TableHead>
+                <TableHead className="text-right" title="Always all time">
+                  Completion
+                  {windowed && (
+                    <span className="ml-1 font-normal text-muted-foreground">
+                      · all time
+                    </span>
+                  )}
+                </TableHead>
+                <TableHead className="pr-6 text-right" title="Always all time">
+                  Avg. progress
+                  {windowed && (
+                    <span className="ml-1 font-normal text-muted-foreground">
+                      · all time
+                    </span>
+                  )}
                 </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {analytics.courses.map((row) => (
+              {analytics.courses.map((row) => {
+                const emptyReason = noCompletionDataReason(row);
+                return (
                 <TableRow key={row.courseId}>
                   <TableCell className="pl-6 font-medium">
                     <Link
@@ -196,7 +306,7 @@ function AnalyticsSection({
                     </Link>
                   </TableCell>
                   <TableCell>{statusBadge(row.status)}</TableCell>
-                  <TableCell className="pr-6 text-right tabular-nums">
+                  <TableCell className="text-right tabular-nums">
                     {windowed ? (
                       <>
                         {row.newEnrollmentCount}
@@ -208,8 +318,23 @@ function AnalyticsSection({
                       row.studentCount
                     )}
                   </TableCell>
+                  <TableCell className="text-right">
+                    <PercentCell
+                      value={row.completionRate}
+                      label={`Completion rate for ${row.title}`}
+                      emptyReason={emptyReason}
+                    />
+                  </TableCell>
+                  <TableCell className="pr-6 text-right">
+                    <PercentCell
+                      value={row.averageProgress}
+                      label={`Average progress for ${row.title}`}
+                      emptyReason={emptyReason}
+                    />
+                  </TableCell>
                 </TableRow>
-              ))}
+                );
+              })}
             </TableBody>
           </Table>
         </Card>

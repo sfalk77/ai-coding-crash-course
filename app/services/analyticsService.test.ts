@@ -17,7 +17,10 @@ import { createTeamPurchase } from "./purchaseService";
 import { redeemCoupon } from "./couponService";
 
 function enroll(userId: number, courseId: number, enrolledAt?: string) {
-  testDb.insert(schema.enrollments).values({ userId, courseId, enrolledAt }).run();
+  testDb
+    .insert(schema.enrollments)
+    .values({ userId, courseId, enrolledAt })
+    .run();
 }
 
 const CUTOFF = new Date("2026-06-01T00:00:00.000Z");
@@ -51,6 +54,40 @@ function addUser(name: string, role = schema.UserRole.Student) {
     .values({ name, email: `${name}@example.com`, role })
     .returning()
     .get();
+}
+
+function addLessons(courseId: number, n: number) {
+  const mod = testDb
+    .insert(schema.modules)
+    .values({ courseId, title: "M", position: 1 })
+    .returning()
+    .get();
+  return Array.from({ length: n }, (_, i) =>
+    testDb
+      .insert(schema.lessons)
+      .values({ moduleId: mod.id, title: `L${i + 1}`, position: i + 1 })
+      .returning()
+      .get()
+  );
+}
+
+function recordProgress(
+  userId: number,
+  lessonId: number,
+  status = schema.LessonProgressStatus.Completed
+) {
+  testDb
+    .insert(schema.lessonProgress)
+    .values({
+      userId,
+      lessonId,
+      status,
+      completedAt:
+        status === schema.LessonProgressStatus.Completed
+          ? "2020-01-01T00:00:00.000Z"
+          : null,
+    })
+    .run();
 }
 
 type Analytics = ReturnType<typeof getInstructorAnalytics>;
@@ -157,7 +194,10 @@ describe("analyticsService", () => {
     });
 
     it("never includes another instructor's courses or enrollments", () => {
-      const otherInstructor = addUser("other-instructor", schema.UserRole.Instructor);
+      const otherInstructor = addUser(
+        "other-instructor",
+        schema.UserRole.Instructor
+      );
       const foreign = addCourse(otherInstructor.id, "foreign");
       const otherStudent = addUser("other-student");
       enroll(otherStudent.id, foreign.id);
@@ -170,7 +210,11 @@ describe("analyticsService", () => {
     });
 
     it("includes courses of every status, with 0 students when nobody enrolled", () => {
-      const draft = addCourse(base.instructor.id, "draft", schema.CourseStatus.Draft);
+      const draft = addCourse(
+        base.instructor.id,
+        "draft",
+        schema.CourseStatus.Draft
+      );
       const archived = addCourse(
         base.instructor.id,
         "archived",
@@ -244,7 +288,10 @@ describe("analyticsService", () => {
       enroll(veteran.id, base.course.id, JUST_OUTSIDE);
       enroll(veteran.id, second.id, JUST_INSIDE);
       // Another instructor's new enrollments never leak in.
-      const otherInstructor = addUser("other-instructor", schema.UserRole.Instructor);
+      const otherInstructor = addUser(
+        "other-instructor",
+        schema.UserRole.Instructor
+      );
       const foreign = addCourse(otherInstructor.id, "foreign");
       enroll(other.id, foreign.id, JUST_INSIDE);
 
@@ -263,6 +310,130 @@ describe("analyticsService", () => {
         newEnrollmentCount: 0,
       });
       expect(result.totals).toMatchObject({ students: 3, newEnrollments: 4 });
+    });
+  });
+
+  describe("getInstructorAnalytics completion", () => {
+    it("counts a student with every lesson completed as complete and a partial student towards progress only", () => {
+      const [l1, l2, l3, l4] = addLessons(base.course.id, 4);
+      const partial = addUser("partial");
+      enroll(base.user.id, base.course.id);
+      enroll(partial.id, base.course.id);
+      for (const l of [l1, l2, l3, l4]) recordProgress(base.user.id, l.id);
+      recordProgress(partial.id, l1.id);
+      recordProgress(partial.id, l2.id, schema.LessonProgressStatus.InProgress);
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      // full: 4/4, partial: 1/4 -> rate 1/2, progress (1 + 0.25) / 2
+      expect(rowOf(result, base.course.id)).toMatchObject({
+        completionRate: 0.5,
+        averageProgress: 0.625,
+      });
+      expect(result.totals).toMatchObject({
+        completionRate: 0.5,
+        averageProgress: 0.625,
+      });
+    });
+
+    it("reports null completion figures for courses with no lessons or no enrolled students", () => {
+      const noLessons = addCourse(base.instructor.id, "no-lessons");
+      enroll(base.user.id, noLessons.id);
+      addLessons(base.course.id, 2); // lessons, but nobody enrolled
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      for (const id of [noLessons.id, base.course.id]) {
+        expect(rowOf(result, id)).toMatchObject({
+          completionRate: null,
+          averageProgress: null,
+        });
+      }
+      expect(result.totals).toMatchObject({
+        completionRate: null,
+        averageProgress: null,
+      });
+    });
+
+    it("recomputes totals over all enrolled students instead of averaging course figures", () => {
+      // base course: 1 of 1 students complete (2/2 lessons).
+      const [a1, a2] = addLessons(base.course.id, 2);
+      enroll(base.user.id, base.course.id);
+      recordProgress(base.user.id, a1.id);
+      recordProgress(base.user.id, a2.id);
+      // second course: 0 of 3 complete, progress 1/2, 0, 0.
+      const second = addCourse(base.instructor.id, "second");
+      const [b1] = addLessons(second.id, 2);
+      const [x, y, z] = [addUser("x"), addUser("y"), addUser("z")];
+      for (const u of [x, y, z]) enroll(u.id, second.id);
+      recordProgress(x.id, b1.id);
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(rowOf(result, base.course.id)).toMatchObject({
+        completionRate: 1,
+        averageProgress: 1,
+      });
+      expect(rowOf(result, second.id).completionRate).toBe(0);
+      expect(rowOf(result, second.id).averageProgress).toBeCloseTo(1 / 6);
+      // Averaging course figures would give 0.5 and 7/12.
+      expect(result.totals.completionRate).toBe(0.25);
+      expect(result.totals.averageProgress).toBeCloseTo(1.5 / 4);
+    });
+
+    it("ignores the cutoff", () => {
+      const [l1, l2] = addLessons(base.course.id, 2);
+      const late = addUser("late");
+      enroll(base.user.id, base.course.id, JUST_OUTSIDE);
+      enroll(late.id, base.course.id, JUST_INSIDE);
+      recordProgress(base.user.id, l1.id);
+      recordProgress(base.user.id, l2.id);
+
+      const allTime = getInstructorAnalytics(base.instructor.id);
+      const windowed = getInstructorAnalytics(base.instructor.id, CUTOFF);
+
+      for (const result of [allTime, windowed]) {
+        expect(rowOf(result, base.course.id)).toMatchObject({
+          completionRate: 0.5,
+          averageProgress: 0.5,
+        });
+        expect(result.totals).toMatchObject({
+          completionRate: 0.5,
+          averageProgress: 0.5,
+        });
+      }
+    });
+
+    it("counts only enrolled students' completed lessons of the course itself, once each", () => {
+      const [l1, l2] = addLessons(base.course.id, 2);
+      const other = addCourse(base.instructor.id, "other");
+      const [o1] = addLessons(other.id, 1);
+      const bystander = addUser("bystander");
+      enroll(base.user.id, base.course.id);
+      enroll(base.user.id, base.course.id);
+      // Duplicate progress rows for one lesson are still one lesson.
+      recordProgress(base.user.id, l1.id);
+      recordProgress(base.user.id, l1.id);
+      // A lesson of another course doesn't count towards this one.
+      recordProgress(base.user.id, o1.id);
+      // Progress without an enrollment isn't part of the population.
+      recordProgress(bystander.id, l1.id);
+      recordProgress(bystander.id, l2.id);
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(rowOf(result, base.course.id)).toMatchObject({
+        completionRate: 0,
+        averageProgress: 0.5,
+      });
+      expect(rowOf(result, other.id)).toMatchObject({
+        completionRate: null,
+        averageProgress: null,
+      });
+      expect(result.totals).toMatchObject({
+        completionRate: 0,
+        averageProgress: 0.5,
+      });
     });
   });
 });
