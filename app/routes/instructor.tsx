@@ -29,6 +29,7 @@ import {
   AlertTriangle,
   BookOpen,
   CircleCheck,
+  DollarSign,
   GraduationCap,
   Plus,
   Users,
@@ -36,6 +37,7 @@ import {
 import { CourseImage } from "~/components/course-image";
 import { isRouteErrorResponse } from "react-router";
 import { CourseStatus } from "~/db/schema";
+import { formatPrice } from "~/lib/utils";
 
 export function meta() {
   return [
@@ -133,6 +135,11 @@ function wholePercent(fraction: number) {
 
 function percent(fraction: number) {
   return `${wholePercent(fraction)}%`;
+}
+
+/** Revenue in cents as USD; unlike a price, zero is "$0.00", not "Free". */
+function formatRevenue(cents: number) {
+  return cents === 0 ? "$0.00" : formatPrice(cents);
 }
 
 function ProgressBar({ value, label }: { value: number; label: string }) {
@@ -267,7 +274,7 @@ function AnalyticsSection({
   analytics: InstructorAnalytics;
   range: Range;
 }) {
-  const { students, newEnrollments, completionRate, averageProgress } =
+  const { students, newEnrollments, revenue, completionRate, averageProgress } =
     analytics.totals;
   const windowed = newEnrollments !== null;
 
@@ -295,6 +302,22 @@ function AnalyticsSection({
               {windowed
                 ? `${students} distinct students in total`
                 : "Distinct students across all courses"}
+            </p>
+          </CardContent>
+        </Card>
+        <Card className="gap-2">
+          <CardHeader className="flex flex-row items-center justify-between pb-0">
+            <span className="text-sm font-medium text-muted-foreground">
+              Revenue
+            </span>
+            <DollarSign className="size-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-bold tabular-nums">
+              {formatRevenue(revenue)}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Gross, after regional pricing · {RANGES[range].label.toLowerCase()}
             </p>
           </CardContent>
         </Card>
@@ -334,6 +357,7 @@ function AnalyticsSection({
                 <TableHead className="text-right">
                   {windowed ? "New enrollments" : "Students"}
                 </TableHead>
+                <TableHead className="text-right">Revenue</TableHead>
                 <TableHead className="text-right" title="Always all time">
                   Completion
                   {windowed && (
@@ -377,6 +401,9 @@ function AnalyticsSection({
                     ) : (
                       row.studentCount
                     )}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatRevenue(row.revenue)}
                   </TableCell>
                   <TableCell className="text-right">
                     <PercentCell

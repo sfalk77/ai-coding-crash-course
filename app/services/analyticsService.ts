@@ -1,4 +1,13 @@
-import { and, count, countDistinct, eq, gte, min, sql } from "drizzle-orm";
+import {
+  and,
+  count,
+  countDistinct,
+  eq,
+  gte,
+  min,
+  sql,
+  sum,
+} from "drizzle-orm";
 import { db } from "~/db";
 import {
   courses,
@@ -7,6 +16,7 @@ import {
   LessonProgressStatus,
   lessons,
   modules,
+  purchases,
 } from "~/db/schema";
 
 /**
@@ -66,11 +76,13 @@ export function getInstructorAnalytics(instructorId: number, since?: Date) {
   const newInWindow = since ? newEnrollmentCounts(instructorId, since) : null;
   // Completion is always all time: `since` is deliberately not passed.
   const completion = completionFigures(instructorId);
+  const revenue = revenueFigures(instructorId, since);
 
   return {
     totals: {
       students: totalStudents?.count ?? 0,
       newEnrollments: newInWindow?.total ?? null,
+      revenue: revenue.total,
       ...completion.total,
     },
     courses: instructorCourses.map((course) => ({
@@ -85,6 +97,7 @@ export function getInstructorAnalytics(instructorId: number, since?: Date) {
       newEnrollmentCount: newInWindow
         ? (newInWindow.byCourse.get(course.id) ?? 0)
         : null,
+      revenue: revenue.byCourse.get(course.id) ?? 0,
       ...(completion.byCourse.get(course.id) ?? NO_COMPLETION_DATA),
     })),
   };
@@ -135,6 +148,38 @@ function newEnrollmentCounts(instructorId: number, since: Date) {
     .get();
 
   return { byCourse: byCourse(perCourse), total: total?.count ?? 0 };
+}
+
+/**
+ * Gross revenue in cents: the sum of `amountPaid` (after regional pricing) on
+ * purchases of the instructor's courses. A team purchase is one row holding
+ * the full amount, dated when it was bought; coupon redemptions create no
+ * purchase and so add nothing. With `since`, only purchases made at or after
+ * it count.
+ */
+function revenueFigures(instructorId: number, since?: Date) {
+  const scope = and(
+    eq(courses.instructorId, instructorId),
+    // Timestamps are ISO-8601 UTC strings, so string order is time order.
+    since ? gte(purchases.createdAt, since.toISOString()) : undefined
+  );
+
+  const perCourse = db
+    .select({
+      courseId: purchases.courseId,
+      revenue: sum(purchases.amountPaid).mapWith(Number),
+    })
+    .from(purchases)
+    .innerJoin(courses, eq(courses.id, purchases.courseId))
+    .where(scope)
+    .groupBy(purchases.courseId)
+    .all();
+
+  return {
+    byCourse: new Map(perCourse.map((r) => [r.courseId, r.revenue])),
+    // Every purchase belongs to exactly one course, so totals are the sum.
+    total: perCourse.reduce((acc, r) => acc + r.revenue, 0),
+  };
 }
 
 type CompletionFigures = {

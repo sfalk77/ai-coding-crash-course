@@ -13,7 +13,7 @@ vi.mock("~/db", () => ({
 
 // Import after mock so the module picks up our test db
 import { getInstructorAnalytics } from "./analyticsService";
-import { createTeamPurchase } from "./purchaseService";
+import { createPurchase, createTeamPurchase } from "./purchaseService";
 import { redeemCoupon } from "./couponService";
 
 function enroll(userId: number, courseId: number, enrolledAt?: string) {
@@ -88,6 +88,19 @@ function recordProgress(
           : null,
     })
     .run();
+}
+
+function purchase(
+  userId: number,
+  courseId: number,
+  amountPaid: number,
+  createdAt?: string
+) {
+  return testDb
+    .insert(schema.purchases)
+    .values({ userId, courseId, amountPaid, country: "US", createdAt })
+    .returning()
+    .get();
 }
 
 type Analytics = ReturnType<typeof getInstructorAnalytics>;
@@ -434,6 +447,105 @@ describe("analyticsService", () => {
         completionRate: 0,
         averageProgress: 0.5,
       });
+    });
+  });
+
+  describe("getInstructorAnalytics revenue", () => {
+    it("sums the amount actually paid per course and in total", () => {
+      const second = addCourse(base.instructor.id, "second");
+      const buyer = addUser("buyer");
+      // Regional pricing: the discounted amount paid is what counts.
+      createPurchase(base.user.id, base.course.id, 4999, "US");
+      createPurchase(buyer.id, base.course.id, 2500, "IN");
+      createPurchase(buyer.id, second.id, 1000, "DE");
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(rowOf(result, base.course.id).revenue).toBe(7499);
+      expect(rowOf(result, second.id).revenue).toBe(1000);
+      expect(result.totals.revenue).toBe(8499);
+    });
+
+    it("reports 0 for a course with no purchases", () => {
+      const empty = addCourse(base.instructor.id, "empty");
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(rowOf(result, empty.id).revenue).toBe(0);
+      expect(rowOf(result, base.course.id).revenue).toBe(0);
+      expect(result.totals.revenue).toBe(0);
+    });
+
+    it("counts a team purchase in full, and coupon redemptions add nothing", () => {
+      const buyer = addUser("buyer");
+      const { coupons } = createTeamPurchase(
+        buyer.id,
+        base.course.id,
+        30000,
+        "US",
+        3
+      );
+      const redeemed = redeemCoupon(coupons[0].code, base.user.id, "US");
+      expect(redeemed.ok).toBe(true);
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(rowOf(result, base.course.id).revenue).toBe(30000);
+      expect(result.totals.revenue).toBe(30000);
+    });
+
+    it("never counts another instructor's purchases", () => {
+      const otherInstructor = addUser(
+        "other-instructor",
+        schema.UserRole.Instructor
+      );
+      const foreign = addCourse(otherInstructor.id, "foreign");
+      createPurchase(base.user.id, foreign.id, 9999, "US");
+      createPurchase(base.user.id, base.course.id, 100, "US");
+
+      const result = getInstructorAnalytics(base.instructor.id);
+
+      expect(result.courses.map((c) => c.courseId)).toEqual([base.course.id]);
+      expect(result.totals.revenue).toBe(100);
+    });
+
+    it("with a cutoff counts only purchases made at or after it", () => {
+      const second = addCourse(base.instructor.id, "second");
+      const [a, b, c] = [addUser("a"), addUser("b"), addUser("c")];
+      purchase(a.id, base.course.id, 100, JUST_INSIDE);
+      purchase(b.id, base.course.id, 200, AT_CUTOFF);
+      purchase(c.id, base.course.id, 400, JUST_OUTSIDE);
+      purchase(a.id, second.id, 800, JUST_OUTSIDE);
+
+      const windowed = getInstructorAnalytics(base.instructor.id, CUTOFF);
+      const allTime = getInstructorAnalytics(base.instructor.id);
+
+      expect(rowOf(windowed, base.course.id).revenue).toBe(300);
+      expect(rowOf(windowed, second.id).revenue).toBe(0);
+      expect(windowed.totals.revenue).toBe(300);
+      expect(rowOf(allTime, base.course.id).revenue).toBe(700);
+      expect(allTime.totals.revenue).toBe(1500);
+    });
+
+    it("dates a team purchase by when it was bought, not when coupons are redeemed", () => {
+      const buyer = addUser("buyer");
+      const bought = purchase(buyer.id, base.course.id, 30000, JUST_OUTSIDE);
+      const team = testDb.insert(schema.teams).values({}).returning().get();
+      testDb
+        .insert(schema.coupons)
+        .values({
+          code: "LATE",
+          teamId: team.id,
+          courseId: base.course.id,
+          purchaseId: bought.id,
+          redeemedByUserId: base.user.id,
+          redeemedAt: JUST_INSIDE,
+        })
+        .run();
+
+      const result = getInstructorAnalytics(base.instructor.id, CUTOFF);
+
+      expect(result.totals.revenue).toBe(0);
     });
   });
 });
