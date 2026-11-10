@@ -4,12 +4,19 @@ import {
   getInstructorAnalytics,
   type InstructorAnalytics,
 } from "~/services/analyticsService";
-import { getCurrentUserId } from "~/lib/session";
-import { getUserById } from "~/services/userService";
+import { requireInstructorOrAdmin } from "~/lib/access.server";
+import { getInstructorOptions } from "~/services/userService";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Badge } from "~/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 import {
   Table,
   TableBody,
@@ -27,8 +34,8 @@ import {
   Users,
 } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
-import { data, isRouteErrorResponse } from "react-router";
-import { CourseStatus, UserRole } from "~/db/schema";
+import { isRouteErrorResponse } from "react-router";
+import { CourseStatus } from "~/db/schema";
 
 export function meta() {
   return [
@@ -55,30 +62,46 @@ function cutoffFor(range: Range, now = new Date()): Date | undefined {
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 }
 
+type InstructorOption = ReturnType<typeof getInstructorOptions>[number];
+
+/**
+ * Admins pick an instructor via ?instructorId=; a missing or unknown id falls
+ * back to the first instructor alphabetically (undefined if there are none).
+ */
+function pickInstructor(
+  instructors: InstructorOption[],
+  param: string | null
+): InstructorOption | undefined {
+  const id = Number(param);
+  return instructors.find((i) => i.id === id) ?? instructors[0];
+}
+
 export async function loader({ request, url }: Route.LoaderArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("Select a user from the DevUI panel to view your courses.", {
-      status: 401,
-    });
-  }
-
-  const user = getUserById(currentUserId);
-
-  if (!user || user.role !== UserRole.Instructor) {
-    throw data("Only instructors can access this page.", {
-      status: 403,
-    });
-  }
-
+  const { userId, isAdmin } = await requireInstructorOrAdmin(request);
   const range = parseRange(url.searchParams.get("range"));
+
+  // Instructors always see their own data; only admins may choose.
+  let picker: { instructors: InstructorOption[]; selected: InstructorOption } | null =
+    null;
+  let instructorId: number | undefined = userId;
+
+  if (isAdmin) {
+    const instructors = getInstructorOptions();
+    const selected = pickInstructor(instructors, url.searchParams.get("instructorId"));
+    picker = selected ? { instructors, selected } : null;
+    instructorId = selected?.id;
+  }
 
   // One call feeds both the analytics section and the course cards,
   // using grouped queries instead of one query per course.
   return {
     range,
-    analytics: getInstructorAnalytics(currentUserId, cutoffFor(range)),
+    isAdmin,
+    picker,
+    analytics:
+      instructorId === undefined
+        ? null
+        : getInstructorAnalytics(instructorId, cutoffFor(range)),
   };
 }
 
@@ -196,6 +219,43 @@ function RangeToggle({ range }: { range: Range }) {
           </Link>
         );
       })}
+    </div>
+  );
+}
+
+function InstructorPicker({
+  instructors,
+  selected,
+}: {
+  instructors: InstructorOption[];
+  selected: InstructorOption;
+}) {
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  return (
+    <div className="flex items-center gap-2">
+      <span id="instructor-picker-label" className="text-sm text-muted-foreground">
+        Instructor
+      </span>
+      <Select
+        value={String(selected.id)}
+        onValueChange={(value) => {
+          const params = new URLSearchParams(searchParams);
+          params.set("instructorId", value);
+          setSearchParams(params, { replace: true, preventScrollReset: true });
+        }}
+      >
+        <SelectTrigger aria-labelledby="instructor-picker-label" className="w-56">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {instructors.map((instructor) => (
+            <SelectItem key={instructor.id} value={String(instructor.id)}>
+              {instructor.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }
@@ -380,8 +440,23 @@ export function HydrateFallback() {
 export default function InstructorDashboard({
   loaderData,
 }: Route.ComponentProps) {
-  const { analytics, range } = loaderData;
+  const { analytics, range, isAdmin, picker } = loaderData;
+
+  if (analytics === null) {
+    return (
+      <div className="flex min-h-[50vh] flex-col items-center justify-center p-6 text-center">
+        <GraduationCap className="mb-4 size-12 text-muted-foreground/50" />
+        <h1 className="text-lg font-medium">No instructors yet</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          There is no instructor whose courses could be shown.
+        </p>
+      </div>
+    );
+  }
+
   const courses = analytics.courses;
+  const viewingOther = picker !== null;
+  const heading = viewingOther ? `${picker.selected.name}'s Courses` : "My Courses";
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -391,22 +466,30 @@ export default function InstructorDashboard({
           Home
         </Link>
         <span className="mx-2">/</span>
-        <span className="text-foreground">My Courses</span>
+        <span className="text-foreground">{heading}</span>
       </nav>
 
-      <div className="mb-8 flex items-center justify-between">
+      <div className="mb-8 flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold">My Courses</h1>
+          <h1 className="text-3xl font-bold">{heading}</h1>
           <p className="mt-1 text-muted-foreground">
-            Manage your courses and track enrollments
+            {viewingOther
+              ? "Viewing this instructor's courses and enrollments as an admin"
+              : "Manage your courses and track enrollments"}
           </p>
         </div>
-        <Link to="/instructor/new">
-          <Button>
-            <Plus className="mr-2 size-4" />
-            New Course
-          </Button>
-        </Link>
+        {picker ? (
+          <InstructorPicker instructors={picker.instructors} selected={picker.selected} />
+        ) : (
+          !isAdmin && (
+            <Link to="/instructor/new">
+              <Button>
+                <Plus className="mr-2 size-4" />
+                New Course
+              </Button>
+            </Link>
+          )
+        )}
       </div>
 
       <AnalyticsSection analytics={analytics} range={range} />
@@ -415,15 +498,19 @@ export default function InstructorDashboard({
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <GraduationCap className="mb-4 size-12 text-muted-foreground/50" />
           <h2 className="text-lg font-medium">No courses yet</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Create your first course to get started.
-          </p>
-          <Link to="/instructor/new" className="mt-4">
-            <Button>
-              <Plus className="mr-2 size-4" />
-              Create Course
-            </Button>
-          </Link>
+          {!isAdmin && (
+            <>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Create your first course to get started.
+              </p>
+              <Link to="/instructor/new" className="mt-4">
+                <Button>
+                  <Plus className="mr-2 size-4" />
+                  Create Course
+                </Button>
+              </Link>
+            </>
+          )}
         </div>
       ) : (
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
